@@ -17,3 +17,8 @@ sources:
 - https://github.com/kiali/kiali-operator
 - https://github.com/kiali/helm-charts
 icon: https://raw.githubusercontent.com/kiali/kiali.io/current/assets/icons/logo.svg
+
+dependencies:
+  - name: istio-virtualservice
+    version: 0.1.5
+    repository: s3://giffgaff-charts
