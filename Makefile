@@ -6,7 +6,8 @@ ROOTDIR=$(CURDIR)
 OUTDIR=${ROOTDIR}/_output
 
 # Identifies the current build.
-VERSION ?= v2.0.0
+
+VERSION ?= v2.7.1
 SEMVER ?= $(shell echo ${VERSION} | sed 's/^v//g')
 COMMIT_HASH ?= $(shell git rev-parse HEAD)
 
@@ -45,7 +46,8 @@ clean:
 	        i386)   arch="386" ;; \
 	        i686)   arch="386" ;; \
 	        x86_64) arch="amd64" ;; \
-	        arm|arm64)    dpkg --print-architecture | grep -q "arm64" && arch="arm64" || arch="arm" ;; \
+	        arm) arch="arm" ;; \
+	        arm64|aarch64) arch="arm64" ;; \
 	    esac ;\
 	    cd "${OUTDIR}/helm-install" ;\
 	    curl -L "https://get.helm.sh/helm-${HELM_VERSION}-$${os}-$${arch}.tar.gz" > "${OUTDIR}/helm-install/helm.tar.gz" ;\

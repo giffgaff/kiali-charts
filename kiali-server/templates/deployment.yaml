@@ -1,3 +1,4 @@
+{{- if not .Values.deployment.remote_cluster_resources_only }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -71,6 +72,7 @@ spec:
         - "/opt/kiali/kiali"
         - "-config"
         - "/kiali-configuration/config.yaml"
+        terminationMessagePolicy: FallbackToLogsOnError
         securityContext:
         {{- if .Values.deployment.security_context}}
         {{- toYaml .Values.deployment.security_context | nindent 10 }}
@@ -99,8 +101,8 @@ spec:
             {{- else }}
             scheme: HTTP
             {{- end }}
-          initialDelaySeconds: 5
-          periodSeconds: 30
+          initialDelaySeconds: {{ .Values.deployment.probes.readiness.initial_delay_seconds | int | default 5 }}
+          periodSeconds: {{ .Values.deployment.probes.readiness.period_seconds | int | default 30 }}
         livenessProbe:
           httpGet:
             path: {{ include "kiali-server.server.web_root" . | trimSuffix "/"  }}/healthz
@@ -110,8 +112,20 @@ spec:
             {{- else }}
             scheme: HTTP
             {{- end }}
-          initialDelaySeconds: 5
-          periodSeconds: 30
+          initialDelaySeconds: {{ .Values.deployment.probes.liveness.initial_delay_seconds | int | default 5 }}
+          periodSeconds: {{ .Values.deployment.probes.liveness.period_seconds | int | default 30 }}
+        startupProbe:
+          httpGet:
+            path: {{ include "kiali-server.server.web_root" . | trimSuffix "/"  }}/healthz
+            port: api-port
+            {{- if (include "kiali-server.identity.cert_file" .) }}
+            scheme: HTTPS
+            {{- else }}
+            scheme: HTTP
+            {{- end }}
+          failureThreshold: {{ .Values.deployment.probes.startup.failure_threshold | int | default 6 }}
+          initialDelaySeconds: {{ .Values.deployment.probes.startup.initial_delay_seconds | int | default 30 }}
+          periodSeconds: {{ .Values.deployment.probes.startup.period_seconds | int | default 10 }}
         env:
         - name: ACTIVE_NAMESPACE
           valueFrom:
@@ -162,7 +176,7 @@ spec:
           name: {{ include "kiali-server.fullname" . }}
       - name: {{ include "kiali-server.fullname" . }}-cert
         secret:
-          {{- if .Capabilities.APIVersions.Has "route.openshift.io/v1" }}
+          {{- if eq "true" (include "kiali-server.isOpenShift" .) }}
           secretName: {{ include "kiali-server.fullname" . }}-cert-secret
           {{- else }}
           secretName: istio.{{ include "kiali-server.fullname" . }}-service-account
@@ -177,7 +191,7 @@ spec:
       - name: {{ include "kiali-server.fullname" . }}-cabundle
         configMap:
           name: {{ include "kiali-server.fullname" . }}-cabundle
-      {{- if not (.Capabilities.APIVersions.Has "route.openshift.io/v1") }}
+      {{- if not (eq "true" (include "kiali-server.isOpenShift" .)) }}
           optional: true
       {{- end }}
       {{- range .Values.deployment.custom_secrets }}
@@ -225,4 +239,9 @@ spec:
       nodeSelector:
       {{- toYaml .Values.deployment.node_selector | nindent 8 }}
       {{- end }}
+      {{- if .Values.deployment.topology_spread_constraints }}
+      topologySpreadConstraints:
+      {{- toYaml .Values.deployment.topology_spread_constraints | nindent 8 }}
+      {{- end }}
 ...
+{{- end }}
