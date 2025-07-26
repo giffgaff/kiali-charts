@@ -34,6 +34,9 @@ Identifies the log_level.
 Common labels
 */}}
 {{- define "kiali-server.labels" -}}
+{{- if .Values.deployment.extra_labels }}
+{{ toYaml .Values.deployment.extra_labels }}
+{{- end }}
 helm.sh/chart: {{ include "kiali-server.chart" . }}
 app: kiali
 {{ include "kiali-server.selectorLabels" . }}
@@ -170,6 +173,7 @@ Determine the root namespace - default is where Kiali is installed.
 
 {{/*
 Autodetect remote cluster secrets if enabled - looks for secrets in the same namespace where Kiali is installed.
+Note that this will ignore any secret named "kiali-multi-cluster-secret" because that will optionally be mounted always.
 Returns a JSON dict whose keys are the cluster names and values are the cluster secret data.
 */}}
 {{- define "kiali-server.remote-cluster-secrets" -}}
@@ -179,14 +183,32 @@ Returns a JSON dict whose keys are the cluster names and values are the cluster 
   {{- $secretLabelNameToLookFor := first $secretLabelToLookFor }}
   {{- $secretLabelValueToLookFor := last $secretLabelToLookFor }}
   {{- range $i, $secret := (lookup "v1" "Secret" .Release.Namespace "").items }}
-    {{- if (and (and (hasKey $secret.metadata "labels") (hasKey $secret.metadata.labels $secretLabelNameToLookFor)) (eq (get $secret.metadata.labels $secretLabelNameToLookFor) ($secretLabelValueToLookFor))) }}
-      {{- $clusterName := $secret.metadata.name }}
-      {{- if (and (hasKey $secret.metadata "annotations") (hasKey $secret.metadata.annotations "kiali.io/cluster")) }}
-        {{- $clusterName = get $secret.metadata.annotations "kiali.io/cluster" }}
+    {{- if ne $secret.metadata.name "kiali-multi-cluster-secret" }}
+      {{- if (and (and (hasKey $secret.metadata "labels") (hasKey $secret.metadata.labels $secretLabelNameToLookFor)) (eq (get $secret.metadata.labels $secretLabelNameToLookFor) ($secretLabelValueToLookFor))) }}
+        {{- $clusterName := $secret.metadata.name }}
+        {{- if (and (hasKey $secret.metadata "annotations") (hasKey $secret.metadata.annotations "kiali.io/cluster")) }}
+          {{- $clusterName = get $secret.metadata.annotations "kiali.io/cluster" }}
+        {{- end }}
+        {{- $theDict = set $theDict $clusterName $secret.metadata.name }}
       {{- end }}
-      {{- $theDict = set $theDict $clusterName $secret.metadata.name }}
     {{- end }}
   {{- end }}
 {{- end }}
 {{- $theDict | toJson }}
+{{- end }}
+
+{{/*
+Returns true if the given resource kind is in .Values.skipResources
+This aborts if .Values.skipResources has invalid values.
+*/}}
+{{- define "kiali-server.isSkippedResource" -}}
+  {{- $validSkipResources := dict "clusterrole" true "clusterrolebinding" true "sa" true }}
+  {{- $ctx := .ctx }}
+  {{- $name := .name }}
+  {{- range $i, $item := $ctx.Values.skipResources }}
+    {{- if not (hasKey $validSkipResources $item) }}
+      {{- fail (printf "Aborting due to an invalid entry [%q] in skipResources: %q. Valid list item values are: %q" $item $ctx.Values.skipResources (keys $validSkipResources)) }}
+    {{- end }}
+  {{- end }}
+  {{- has $name $ctx.Values.skipResources }}
 {{- end }}

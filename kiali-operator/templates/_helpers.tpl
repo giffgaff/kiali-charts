@@ -35,6 +35,9 @@ Create chart name and version as used by the chart label.
 Common labels
 */}}
 {{- define "kiali-operator.labels" -}}
+{{- if .Values.extraLabels }}
+{{ toYaml .Values.extraLabels }}
+{{- end }}
 helm.sh/chart: {{ include "kiali-operator.chart" . }}
 app: {{ include "kiali-operator.name" . }}
 {{ include "kiali-operator.selectorLabels" . }}
@@ -53,3 +56,18 @@ app.kubernetes.io/name: {{ include "kiali-operator.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{/*
+Returns true if the given resource kind is in .Values.skipResources
+This aborts if .Values.skipResources has invalid values.
+*/}}
+{{- define "kiali-operator.isSkippedResource" -}}
+  {{- $validSkipResources := dict "clusterrole" true "clusterrolebinding" true "sa" true }}
+  {{- $ctx := .ctx }}
+  {{- $name := .name }}
+  {{- range $i, $item := $ctx.Values.skipResources }}
+    {{- if not (hasKey $validSkipResources $item) }}
+      {{- fail (printf "Aborting due to an invalid entry [%q] in skipResources: %q. Valid list item values are: %q" $item $ctx.Values.skipResources (keys $validSkipResources)) }}
+    {{- end }}
+  {{- end }}
+  {{- has $name $ctx.Values.skipResources }}
+{{- end }}

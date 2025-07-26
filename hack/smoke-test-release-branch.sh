@@ -174,8 +174,8 @@ if ! git checkout -b ${SMOKETEST_BRANCH} ${RELEASE_BRANCH}; then
 fi
 
 # Determine the version we are going to smoke test
-OPERATOR_VERSION="$(ls -1 docs/kiali-operator-*.tgz | sort | tail -n1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
-SERVER_VERSION="$(ls -1 docs/kiali-server-*.tgz | sort | tail -n1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
+OPERATOR_VERSION="$(ls -1 docs/kiali-operator-*.tgz | sort -V | tail -n1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
+SERVER_VERSION="$(ls -1 docs/kiali-server-*.tgz | sort -V | tail -n1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
 
 if [ "${OPERATOR_VERSION}" != "${SERVER_VERSION}" ]; then
   abort_now "The latest helm chart versions for operator [${OPERATOR_VERSION}] and server [${SERVER_VERSION}] do not match. Aborting the test."
@@ -195,6 +195,8 @@ fi
 
 # SMOKE TESTING THE OPERATOR
 
+infomsg "Smoke testing operator version [${OPERATOR_VERSION}]"
+
 if ! ${HELM_EXE} install --create-namespace --namespace ${OPERATOR_NAMESPACE} kiali-operator docs/kiali-operator-${OPERATOR_VERSION}.tgz; then
   abort_now "The Operator Helm Chart did not install successfully. The smoke test has FAILED!"
 fi
@@ -206,9 +208,13 @@ if [ "${ACTUAL_OPERATOR_IMAGE}" != "${EXPECTED_OPERATOR_IMAGE}" ]; then
 fi
 
 if ! ${CLIENT_EXE} wait deployment -l app.kubernetes.io/name=kiali-operator --for=condition=Available -n ${OPERATOR_NAMESPACE} --timeout=5m; then
+  ${CLIENT_EXE} describe deployments -n ${OPERATOR_NAMESPACE} || true
   abort_now "The operator deployment failed to become available. The smoke test has FAILED!"
 fi
 if ! ${CLIENT_EXE} wait pods -l app.kubernetes.io/name=kiali-operator --for=condition=Ready -n ${OPERATOR_NAMESPACE} --timeout=5m; then
+  ${CLIENT_EXE} describe deployments -n ${OPERATOR_NAMESPACE} || true
+  ${CLIENT_EXE} describe pods -n ${OPERATOR_NAMESPACE} || true
+  ${CLIENT_EXE} logs -l app.kubernetes.io/name=kiali-operator -n ${OPERATOR_NAMESPACE} || true
   abort_now "The operator pod failed to start. The smoke test has FAILED!"
 fi
 
@@ -217,6 +223,8 @@ if ! ${HELM_EXE} uninstall --namespace ${OPERATOR_NAMESPACE} kiali-operator; the
 fi
 
 # SMOKE TESTING THE SERVER
+
+infomsg "Smoke testing server version [${SERVER_VERSION}]"
 
 if ! ${HELM_EXE} install --create-namespace --namespace ${SERVER_NAMESPACE} kiali-server docs/kiali-server-${SERVER_VERSION}.tgz; then
   abort_now "The Server Helm Chart did not install successfully. The smoke test has FAILED!"
@@ -229,9 +237,13 @@ if [ "${ACTUAL_SERVER_IMAGE}" != "${EXPECTED_SERVER_IMAGE}" ]; then
 fi
 
 if ! ${CLIENT_EXE} wait deployment -l app.kubernetes.io/name=kiali --for=condition=Available -n ${SERVER_NAMESPACE} --timeout=5m; then
+  ${CLIENT_EXE} describe deployments -n ${SERVER_NAMESPACE} || true
   abort_now "The server deployment failed to become available. The smoke test has FAILED!"
 fi
 if ! ${CLIENT_EXE} wait pods -l app.kubernetes.io/name=kiali --for=condition=Ready -n ${SERVER_NAMESPACE} --timeout=5m; then
+  ${CLIENT_EXE} describe deployments -n ${SERVER_NAMESPACE} || true
+  ${CLIENT_EXE} describe pods -n ${SERVER_NAMESPACE} || true
+  ${CLIENT_EXE} logs -l app.kubernetes.io/name=kiali -n ${SERVER_NAMESPACE} || true
   abort_now "The server pod failed to start. The smoke test has FAILED!"
 fi
 
