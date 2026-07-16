@@ -1,0 +1,137 @@
+name: Kiali Helm Chart Tests
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'kiali-server/**'
+      - 'kiali-operator/**'
+      - 'tests/**'
+      - '.github/workflows/helm-chart-tests.yml'
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'kiali-server/**'
+      - 'kiali-operator/**'
+      - 'tests/**'
+      - '.github/workflows/helm-chart-tests.yml'
+
+env:
+  HELM_VERSION: v3.14.0
+  YQ_VERSION: v4.40.5
+
+jobs:
+  kiali-server-helm-tests:
+    name: Kiali Server Helm Chart Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - name: Setup Helm
+      uses: Azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5.0.0
+      with:
+        version: ${{ env.HELM_VERSION }}
+
+    - name: Install yq
+      run: |
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64
+        wget -qO /tmp/yq_checksums "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/checksums"
+        echo "$(grep '^yq_linux_amd64 ' /tmp/yq_checksums | awk '{print $19}')  /usr/local/bin/yq" | sha256sum --check
+        sudo chmod +x /usr/local/bin/yq
+
+    - name: Verify prerequisites
+      run: |
+        helm version
+        yq --version
+
+    - name: Run Kiali Server Helm Chart Tests
+      run: |
+        make run-helm-tests TEST_SUITE=server DEBUG=true
+
+    - name: Upload server test artifacts on failure
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: server-test-artifacts
+        path: /tmp/kiali-helm-tests/
+        retention-days: 3
+
+  kiali-operator-helm-tests:
+    name: Kiali Operator Helm Chart Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - name: Setup Helm
+      uses: Azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5.0.0
+      with:
+        version: ${{ env.HELM_VERSION }}
+
+    - name: Install yq
+      run: |
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/yq_linux_amd64
+        wget -qO /tmp/yq_checksums "https://github.com/mikefarah/yq/releases/download/${{ env.YQ_VERSION }}/checksums"
+        echo "$(grep '^yq_linux_amd64 ' /tmp/yq_checksums | awk '{print $19}')  /usr/local/bin/yq" | sha256sum --check
+        sudo chmod +x /usr/local/bin/yq
+
+    - name: Verify prerequisites
+      run: |
+        helm version
+        yq --version
+
+    - name: Run Kiali Operator Helm Chart Tests
+      run: |
+        make run-helm-tests TEST_SUITE=operator DEBUG=true
+
+    - name: Upload operator test artifacts on failure
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: operator-test-artifacts
+        path: /tmp/kiali-helm-tests/
+        retention-days: 3
+
+  kiali-server-helm-integration-tests:
+    name: Kiali Server Helm Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - name: Setup Helm
+      uses: Azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5.0.0
+      with:
+        version: ${{ env.HELM_VERSION }}
+
+    - name: Create kind cluster
+      uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+
+    - name: Verify cluster
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+
+    - name: Install Istio and Prometheus
+      run: |
+        helm repo add istio https://istio-release.storage.googleapis.com/charts
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo update
+        kubectl create namespace istio-system
+        helm install istio-base istio/base -n istio-system --wait
+        helm install istiod istio/istiod -n istio-system --wait --set pilot.resources.requests.cpu=100m --set pilot.resources.requests.memory=128Mi
+        helm install prometheus prometheus-community/prometheus -n istio-system --wait --set server.resources.requests.cpu=100m --set server.resources.requests.memory=128Mi --set alertmanager.enabled=false --set prometheus-pushgateway.enabled=false --set kube-state-metrics.enabled=false --set prometheus-node-exporter.enabled=false
+
+    - name: Verify Istio and Prometheus installation
+      run: |
+        kubectl get pods -n istio-system
+        kubectl wait --for=condition=ready pod -l app=istiod -n istio-system --timeout=300s
+        kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n istio-system --timeout=300s || kubectl get pods -n istio-system
+
+    - name: Run Kiali Server Helm integration tests
+      run: |
+        make run-server-itests

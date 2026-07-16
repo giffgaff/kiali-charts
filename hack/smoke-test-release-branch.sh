@@ -13,7 +13,7 @@
 set -ue
 
 # where this script is located
-SCRIPT_DIR="$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # customizable settings via cmd line opts
 CLIENT_EXE="$(which kubectl)"
@@ -21,6 +21,8 @@ GIT_REMOTE_NAME="origin"
 GIT_LOCAL_DIR="${SCRIPT_DIR}/.."
 HELM_EXE="$(which helm)"
 KIND_EXE="$(which kind)"
+IMAGE_POLL_INTERVAL="60"
+IMAGE_WAIT_TIMEOUT="5400"
 RELEASE_BRANCH=""
 RELEASE_BRANCH_PATTERN="helm-charts-release-*"
 
@@ -45,9 +47,9 @@ restore_env() {
   # Go back to the branch the user originally had checked out and delete the smoketest branch we created earlier
   if [ -n "${ORIGINAL_BRANCH}" ]; then
     infomsg "Restoring original git branch"
-    git checkout ${ORIGINAL_BRANCH}
-    if git rev-parse --verify ${SMOKETEST_BRANCH} &> /dev/null; then
-      if ! git branch -D ${SMOKETEST_BRANCH} &> /dev/null; then
+    git checkout "${ORIGINAL_BRANCH}"
+    if git rev-parse --verify "${SMOKETEST_BRANCH}" &> /dev/null; then
+      if ! git branch -D "${SMOKETEST_BRANCH}" &> /dev/null; then
         infomsg "The test branch [${SMOKETEST_BRANCH}] is no longer needed but could not be deleted. Ignoring this error."
       fi
     fi
@@ -57,15 +59,15 @@ restore_env() {
   # Otherwise, delete the namespaces from the existing cluster.
   if [ -n "${KIND_CLUSTER_NAME}" ]; then
     infomsg "Deleting the KinD cluster"
-    ${KIND_EXE} delete cluster --name ${KIND_CLUSTER_NAME}
+    "${KIND_EXE}" delete cluster --name "${KIND_CLUSTER_NAME}"
   else
-    if ${CLIENT_EXE} get namespace ${OPERATOR_NAMESPACE} &> /dev/null; then
+    if "${CLIENT_EXE}" get namespace "${OPERATOR_NAMESPACE}" &> /dev/null; then
       infomsg "Deleting the operator namespace used for the test"
-      ${CLIENT_EXE} delete namespace ${OPERATOR_NAMESPACE}
+      "${CLIENT_EXE}" delete namespace "${OPERATOR_NAMESPACE}"
     fi
-    if ${CLIENT_EXE} get namespace ${SERVER_NAMESPACE} &> /dev/null; then
+    if "${CLIENT_EXE}" get namespace "${SERVER_NAMESPACE}" &> /dev/null; then
       infomsg "Deleting the server namespace used for the test"
-      ${CLIENT_EXE} delete namespace ${SERVER_NAMESPACE}
+      "${CLIENT_EXE}" delete namespace "${SERVER_NAMESPACE}"
     fi
   fi
 }
@@ -83,6 +85,13 @@ Options:
 -c|--client
     The client executable to use to access the Kubernetes cluster.
     Default: "${CLIENT_EXE}"
+-ipi|--image-poll-interval
+    How often (in seconds) to poll quay.io when waiting for images to become available.
+    Default: "${IMAGE_POLL_INTERVAL}"
+-iwt|--image-wait-timeout
+    Max time (in seconds) to wait for both operator and server images to appear on quay.io
+    before starting the smoke test. Set to 0 to skip the wait entirely.
+    Default: "${IMAGE_WAIT_TIMEOUT}"
 -gld|--git-local-dir
     The root directory where the local helm charts repo is found.
     Default: "${GIT_LOCAL_DIR}"
@@ -115,6 +124,8 @@ while [[ $# -gt 0 ]]; do
   key="$1"
   case $key in
     -c|--client)                     CLIENT_EXE="$2";               shift;shift; ;;
+    -ipi|--image-poll-interval)      IMAGE_POLL_INTERVAL="$2";      shift;shift; ;;
+    -iwt|--image-wait-timeout)       IMAGE_WAIT_TIMEOUT="$2";       shift;shift; ;;
     -gld|--git-local-dir)            GIT_LOCAL_DIR="$2";            shift;shift; ;;
     -grn|--git-remote-name)          GIT_REMOTE_NAME="$2";          shift;shift; ;;
     -helm|--helm)                    HELM_EXE="$2";                 shift;shift; ;;
@@ -131,15 +142,17 @@ CLIENT_EXE=$CLIENT_EXE
 GIT_LOCAL_DIR=$GIT_LOCAL_DIR
 GIT_REMOTE_NAME=$GIT_REMOTE_NAME
 HELM_EXE=$HELM_EXE
+IMAGE_POLL_INTERVAL=$IMAGE_POLL_INTERVAL
+IMAGE_WAIT_TIMEOUT=$IMAGE_WAIT_TIMEOUT
 KIND_EXE=$KIND_EXE
 RELEASE_BRANCH=$RELEASE_BRANCH
 RELEASE_BRANCH_PATTERN=$RELEASE_BRANCH_PATTERN"
 
-if ! which ${CLIENT_EXE} &> /dev/null; then
+if ! which "${CLIENT_EXE}" &> /dev/null; then
   abort_now "The Kubernetes client executable is invalid: ${CLIENT_EXE}"
 fi
 
-if ! which ${HELM_EXE} &> /dev/null; then
+if ! which "${HELM_EXE}" &> /dev/null; then
   abort_now "The Helm executable is invalid: ${HELM_EXE}"
 fi
 
@@ -169,7 +182,7 @@ infomsg "Will smoke test remote release branch [${RELEASE_BRANCH}]"
 
 # Determine what branch we are currently on so we can be nice and take the user back to it after we are done with the smoke test.
 ORIGINAL_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if ! git checkout -b ${SMOKETEST_BRANCH} ${RELEASE_BRANCH}; then
+if ! git checkout -b "${SMOKETEST_BRANCH}" "${RELEASE_BRANCH}"; then
   abort_now "Failed to checkout the release branch. Make sure [${RELEASE_BRANCH}] is a valid remote branch name."
 fi
 
@@ -181,14 +194,68 @@ if [ "${OPERATOR_VERSION}" != "${SERVER_VERSION}" ]; then
   abort_now "The latest helm chart versions for operator [${OPERATOR_VERSION}] and server [${SERVER_VERSION}] do not match. Aborting the test."
 fi
 
+# The release workflows for kiali/kiali and kiali/kiali-operator push images to quay.io on
+# independent schedules. This smoke test may run before those workflows finish, so we poll
+# quay.io and wait for both images to appear before proceeding.
+if [ "${IMAGE_WAIT_TIMEOUT}" -gt 0 ] 2>/dev/null; then
+  EXPECTED_OPERATOR_TAG="v${OPERATOR_VERSION}"
+  EXPECTED_SERVER_TAG="v${SERVER_VERSION}"
+  QUAY_OPERATOR_URL="https://quay.io/api/v1/repository/kiali/kiali-operator/tag/?specificTag=${EXPECTED_OPERATOR_TAG}&onlyActiveTags=true"
+  QUAY_SERVER_URL="https://quay.io/api/v1/repository/kiali/kiali/tag/?specificTag=${EXPECTED_SERVER_TAG}&onlyActiveTags=true"
+  DEADLINE=$(( $(date +%s) + IMAGE_WAIT_TIMEOUT ))
+
+  infomsg "Waiting for images on quay.io (timeout=${IMAGE_WAIT_TIMEOUT}s, poll interval=${IMAGE_POLL_INTERVAL}s):"
+  infomsg "  Operator: quay.io/kiali/kiali-operator:${EXPECTED_OPERATOR_TAG}"
+  infomsg "  Server:   quay.io/kiali/kiali:${EXPECTED_SERVER_TAG}"
+
+  OPERATOR_READY="false"
+  SERVER_READY="false"
+
+  while true; do
+    if [ "${OPERATOR_READY}" != "true" ]; then
+      if curl -sf "${QUAY_OPERATOR_URL}" 2>/dev/null | grep -q "\"${EXPECTED_OPERATOR_TAG}\""; then
+        OPERATOR_READY="true"
+        infomsg "Operator image is available on quay.io"
+      fi
+    fi
+
+    if [ "${SERVER_READY}" != "true" ]; then
+      if curl -sf "${QUAY_SERVER_URL}" 2>/dev/null | grep -q "\"${EXPECTED_SERVER_TAG}\""; then
+        SERVER_READY="true"
+        infomsg "Server image is available on quay.io"
+      fi
+    fi
+
+    if [ "${OPERATOR_READY}" == "true" ] && [ "${SERVER_READY}" == "true" ]; then
+      infomsg "Both images are available on quay.io - proceeding with smoke test"
+      break
+    fi
+
+    if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+      MISSING=""
+      if [ "${OPERATOR_READY}" != "true" ]; then MISSING="quay.io/kiali/kiali-operator:${EXPECTED_OPERATOR_TAG}"; fi
+      if [ "${SERVER_READY}" != "true" ]; then
+        if [ -n "${MISSING}" ]; then MISSING="${MISSING}, "; fi
+        MISSING="${MISSING}quay.io/kiali/kiali:${EXPECTED_SERVER_TAG}"
+      fi
+      abort_now "Timed out after ${IMAGE_WAIT_TIMEOUT}s waiting for images on quay.io. Still missing: ${MISSING}"
+    fi
+
+    infomsg "Images not yet available, waiting ${IMAGE_POLL_INTERVAL}s before checking again..."
+    sleep "${IMAGE_POLL_INTERVAL}"
+  done
+else
+  infomsg "Skipping quay.io image availability check (IMAGE_WAIT_TIMEOUT is 0)"
+fi
+
 # Make sure we have access to a running k8s cluster. If there is none, try to start KinD.
-if ! ${CLIENT_EXE} get ns &> /dev/null; then
+if ! "${CLIENT_EXE}" get ns &> /dev/null; then
   infomsg "There does not appear to be a Kubernetes cluster available. Attempting to start KinD..."
-  if ! which ${KIND_EXE} &> /dev/null; then
+  if ! which "${KIND_EXE}" &> /dev/null; then
     abort_now "The KinD executable is invalid: ${KIND_EXE}"
   fi
   KIND_CLUSTER_NAME="smoketest"
-  if ! ${KIND_EXE} create cluster --name ${KIND_CLUSTER_NAME}; then
+  if ! "${KIND_EXE}" create cluster --name "${KIND_CLUSTER_NAME}"; then
     abort_now "Failed to create a KinD cluster. Aborting smoke test."
   fi
 fi
@@ -197,28 +264,28 @@ fi
 
 infomsg "Smoke testing operator version [${OPERATOR_VERSION}]"
 
-if ! ${HELM_EXE} install --create-namespace --namespace ${OPERATOR_NAMESPACE} kiali-operator docs/kiali-operator-${OPERATOR_VERSION}.tgz; then
+if ! "${HELM_EXE}" install --create-namespace --namespace "${OPERATOR_NAMESPACE}" kiali-operator "docs/kiali-operator-${OPERATOR_VERSION}.tgz"; then
   abort_now "The Operator Helm Chart did not install successfully. The smoke test has FAILED!"
 fi
 
-ACTUAL_OPERATOR_IMAGE="$(${CLIENT_EXE} get deployments -n ${OPERATOR_NAMESPACE} -l app.kubernetes.io/name=kiali-operator -o 'jsonpath={.items..spec.containers[0].image}{"\n"}')"
+ACTUAL_OPERATOR_IMAGE="$("${CLIENT_EXE}" get deployments -n "${OPERATOR_NAMESPACE}" -l app.kubernetes.io/name=kiali-operator -o 'jsonpath={.items..spec.containers[0].image}{"\n"}')"
 EXPECTED_OPERATOR_IMAGE="quay.io/kiali/kiali-operator:v${OPERATOR_VERSION}"
 if [ "${ACTUAL_OPERATOR_IMAGE}" != "${EXPECTED_OPERATOR_IMAGE}" ]; then
   abort_now "The actual operator image [${ACTUAL_OPERATOR_IMAGE}] is not the expected image [${EXPECTED_OPERATOR_IMAGE}]. The smoke test has FAILED!"
 fi
 
-if ! ${CLIENT_EXE} wait deployment -l app.kubernetes.io/name=kiali-operator --for=condition=Available -n ${OPERATOR_NAMESPACE} --timeout=5m; then
-  ${CLIENT_EXE} describe deployments -n ${OPERATOR_NAMESPACE} || true
+if ! "${CLIENT_EXE}" wait deployment -l app.kubernetes.io/name=kiali-operator --for=condition=Available -n "${OPERATOR_NAMESPACE}" --timeout=5m; then
+  "${CLIENT_EXE}" describe deployments -n "${OPERATOR_NAMESPACE}" || true
   abort_now "The operator deployment failed to become available. The smoke test has FAILED!"
 fi
-if ! ${CLIENT_EXE} wait pods -l app.kubernetes.io/name=kiali-operator --for=condition=Ready -n ${OPERATOR_NAMESPACE} --timeout=5m; then
-  ${CLIENT_EXE} describe deployments -n ${OPERATOR_NAMESPACE} || true
-  ${CLIENT_EXE} describe pods -n ${OPERATOR_NAMESPACE} || true
-  ${CLIENT_EXE} logs -l app.kubernetes.io/name=kiali-operator -n ${OPERATOR_NAMESPACE} || true
+if ! "${CLIENT_EXE}" wait pods -l app.kubernetes.io/name=kiali-operator --for=condition=Ready -n "${OPERATOR_NAMESPACE}" --timeout=5m; then
+  "${CLIENT_EXE}" describe deployments -n "${OPERATOR_NAMESPACE}" || true
+  "${CLIENT_EXE}" describe pods -n "${OPERATOR_NAMESPACE}" || true
+  "${CLIENT_EXE}" logs -l app.kubernetes.io/name=kiali-operator -n "${OPERATOR_NAMESPACE}" || true
   abort_now "The operator pod failed to start. The smoke test has FAILED!"
 fi
 
-if ! ${HELM_EXE} uninstall --namespace ${OPERATOR_NAMESPACE} kiali-operator; then
+if ! "${HELM_EXE}" uninstall --namespace "${OPERATOR_NAMESPACE}" kiali-operator; then
   abort_now "The Operator Helm Chart was unable to perform an uninstall successfully. The smoke test has FAILED!"
 fi
 
@@ -226,28 +293,28 @@ fi
 
 infomsg "Smoke testing server version [${SERVER_VERSION}]"
 
-if ! ${HELM_EXE} install --create-namespace --namespace ${SERVER_NAMESPACE} kiali-server docs/kiali-server-${SERVER_VERSION}.tgz; then
+if ! "${HELM_EXE}" install --create-namespace --namespace "${SERVER_NAMESPACE}" kiali-server "docs/kiali-server-${SERVER_VERSION}.tgz"; then
   abort_now "The Server Helm Chart did not install successfully. The smoke test has FAILED!"
 fi
 
-ACTUAL_SERVER_IMAGE="$(${CLIENT_EXE} get deployments -n ${SERVER_NAMESPACE} -l app.kubernetes.io/name=kiali -o 'jsonpath={.items..spec.containers[0].image}{"\n"}')"
+ACTUAL_SERVER_IMAGE="$("${CLIENT_EXE}" get deployments -n "${SERVER_NAMESPACE}" -l app.kubernetes.io/name=kiali -o 'jsonpath={.items..spec.containers[0].image}{"\n"}')"
 EXPECTED_SERVER_IMAGE="quay.io/kiali/kiali:v${SERVER_VERSION}"
 if [ "${ACTUAL_SERVER_IMAGE}" != "${EXPECTED_SERVER_IMAGE}" ]; then
   abort_now "The actual server image [${ACTUAL_SERVER_IMAGE}] is not the expected image [${EXPECTED_SERVER_IMAGE}]. The smoke test has FAILED!"
 fi
 
-if ! ${CLIENT_EXE} wait deployment -l app.kubernetes.io/name=kiali --for=condition=Available -n ${SERVER_NAMESPACE} --timeout=5m; then
-  ${CLIENT_EXE} describe deployments -n ${SERVER_NAMESPACE} || true
+if ! "${CLIENT_EXE}" wait deployment -l app.kubernetes.io/name=kiali --for=condition=Available -n "${SERVER_NAMESPACE}" --timeout=5m; then
+  "${CLIENT_EXE}" describe deployments -n "${SERVER_NAMESPACE}" || true
   abort_now "The server deployment failed to become available. The smoke test has FAILED!"
 fi
-if ! ${CLIENT_EXE} wait pods -l app.kubernetes.io/name=kiali --for=condition=Ready -n ${SERVER_NAMESPACE} --timeout=5m; then
-  ${CLIENT_EXE} describe deployments -n ${SERVER_NAMESPACE} || true
-  ${CLIENT_EXE} describe pods -n ${SERVER_NAMESPACE} || true
-  ${CLIENT_EXE} logs -l app.kubernetes.io/name=kiali -n ${SERVER_NAMESPACE} || true
+if ! "${CLIENT_EXE}" wait pods -l app.kubernetes.io/name=kiali --for=condition=Ready -n "${SERVER_NAMESPACE}" --timeout=5m; then
+  "${CLIENT_EXE}" describe deployments -n "${SERVER_NAMESPACE}" || true
+  "${CLIENT_EXE}" describe pods -n "${SERVER_NAMESPACE}" || true
+  "${CLIENT_EXE}" logs -l app.kubernetes.io/name=kiali -n "${SERVER_NAMESPACE}" || true
   abort_now "The server pod failed to start. The smoke test has FAILED!"
 fi
 
-if ! ${HELM_EXE} uninstall --namespace ${SERVER_NAMESPACE} kiali-server; then
+if ! "${HELM_EXE}" uninstall --namespace "${SERVER_NAMESPACE}" kiali-server; then
   abort_now "The Server Helm Chart was unable to perform an uninstall successfully. The smoke test has FAILED!"
 fi
 

@@ -1,0 +1,23 @@
+name: "rbac_no_cluster_wide_access"
+description: "Verify Role and RoleBinding (not ClusterRole/ClusterRoleBinding) are generated when cluster_wide_access is false"
+helm_args:
+  - "--set"
+  - "deployment.cluster_wide_access=false"
+  - "--set"
+  - "auth.strategy=token"
+yq_query: ".kind"
+expected_result: |
+  NetworkPolicy
+  ---
+  ServiceAccount
+  ---
+  ConfigMap
+  ---
+  Role
+  ---
+  RoleBinding
+  ---
+  Service
+  ---
+  Deployment
+should_fail: false

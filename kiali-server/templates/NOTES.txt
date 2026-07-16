@@ -13,18 +13,23 @@ The Kiali Server [{{ .Chart.AppVersion }}] has been installed in namespace [{{ .
 {{- end }}
 ===============
 
-{{- if not .Values.deployment.cluster_wide_access }}
-!!! WARNING !!!
+{{- if or (.Values.deployment.additional_pod_containers_yaml) (.Values.deployment.additional_pod_init_containers_yaml) }}
 ===============
-This Kiali Server Helm Chart does NOT support "deployment.cluster_wide_access" set to "false"!
+SECURITY AUDIT
+===============
+{{- if .Values.deployment.additional_pod_init_containers_yaml }}
+Additional initContainers have been deployed in the Kiali server pod:
+{{- range .Values.deployment.additional_pod_init_containers_yaml }}
+- {{ .name }}
+{{- end }}
+{{- end }}
 
-This feature, as well as others, is only available when using the Kiali Operator to install
-the Kiali Server. It is for this reason this Kiali Server Helm Chart, while provided for
-convenience, is not the recommended installation mechanism for installing the Kiali Server.
-
-When installing with "deployment.cluster_wide_access=false" using this Kiali Server Helm Chart,
-it is your responsibility to manually create the proper Roles and RoleBindings for the Kiali Server
-to have the correct permissions to access the service mesh namespaces.
+{{- if .Values.deployment.additional_pod_containers_yaml }}
+Additional containers have been deployed in the Kiali server pod:
+{{- range .Values.deployment.additional_pod_containers_yaml }}
+- {{ .name }}
+{{- end }}
+{{- end }}
 ===============
 {{- end }}
 

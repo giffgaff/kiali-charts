@@ -1,19 +1,30 @@
 {{- if eq "false" (include "kiali-server.isSkippedResource" (dict "ctx" . "name" "clusterrole")) -}}
-{{- if .Values.deployment.cluster_wide_access -}}
 {{- if or (.Values.deployment.view_only_mode) (ne .Values.auth.strategy "anonymous") -}}
+{{- $namespaces := list "" -}}
+{{- if not .Values.deployment.cluster_wide_access -}}
+{{- $accessibleNamespacesStr := include "kiali-server.accessible-namespaces" . -}}
+{{- $namespaces = splitList "," $accessibleNamespacesStr -}}
+{{- end -}}
+{{- range $namespace := $namespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if $.Values.deployment.cluster_wide_access }}
 kind: ClusterRole
+{{- else }}
+kind: Role
+{{- end }}
 metadata:
-  name: {{ include "kiali-server.fullname" . }}-viewer
+  name: {{ include "kiali-server.fullname" $ }}-viewer
+{{- if not $.Values.deployment.cluster_wide_access }}
+  namespace: {{ $namespace | quote }}
+{{- end }}
   labels:
-    {{- include "kiali-server.labels" . | nindent 4 }}
+    {{- include "kiali-server.labels" $ | nindent 4 }}
 rules:
 - apiGroups: [""]
   resources:
   - configmaps
-  - endpoints
-{{- if not (has "logs-tab" .Values.kiali_feature_flags.disabled_features) }}
+{{- if not (has "logs-tab" $.Values.kiali_feature_flags.disabled_features) }}
   - pods/log
 {{- end }}
   verbs:
@@ -35,8 +46,7 @@ rules:
   - pods/portforward
   verbs:
   - create
-  - post
-- apiGroups: ["extensions", "apps"]
+- apiGroups: ["apps"]
   resources:
   - daemonsets
   - deployments
@@ -59,9 +69,22 @@ rules:
   - security.istio.io
   - extensions.istio.io
   - telemetry.istio.io
-  - gateway.networking.k8s.io
-  - inference.networking.x-k8s.io
+  - inference.networking.k8s.io
   resources: ["*"]
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources:
+  - gatewayclasses
+  - gateways
+  - grpcroutes
+  - httproutes
+  - referencegrants
+  - tcproutes
+  - tlsroutes
+  - udproutes
   verbs:
   - get
   - list
@@ -73,11 +96,6 @@ rules:
   - get
   - list
   - watch
-- apiGroups: ["project.openshift.io"]
-  resources:
-  - projects
-  verbs:
-  - get
 - apiGroups: ["route.openshift.io"]
   resources:
   - routes
@@ -92,17 +110,15 @@ rules:
   resources:
   - oauthclients
   resourceNames:
-  - {{ include "kiali-server.fullname" . }}-{{ .Release.Namespace }}
+  - {{ include "kiali-server.fullname" $ }}-{{ $.Release.Namespace }}
   verbs:
   - get
 - apiGroups: ["admissionregistration.k8s.io"]
   resources:
   - mutatingwebhookconfigurations
   verbs:
-  - get
   - list
-  - watch
 ...
-{{- end -}}
-{{- end -}}
-{{- end -}}
+{{- end -}} {{/* range $namespace */}}
+{{- end -}} {{/* if view_only_mode or auth.strategy is not anonymous */}}
+{{- end -}} {{/* if not isSkippedResource */}}

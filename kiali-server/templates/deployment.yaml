@@ -1,4 +1,5 @@
 {{- if not .Values.deployment.remote_cluster_resources_only }}
+{{- include "kiali-server.validate-oauth2" . }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -15,10 +16,14 @@ spec:
     matchLabels:
       {{- include "kiali-server.selectorLabels" . | nindent 6 }}
   strategy:
+{{- if .Values.deployment.strategy }}
+  {{- toYaml .Values.deployment.strategy | nindent 4 }}
+{{- else }}
     rollingUpdate:
       maxSurge: 1
       maxUnavailable: 1
     type: RollingUpdate
+{{- end }}
   template:
     metadata:
       name: {{ include "kiali-server.fullname" . }}
@@ -32,9 +37,11 @@ spec:
         {{- if .Values.server.observability.metrics.enabled }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.server.observability.metrics.port | quote }}
+        prometheus.io/scheme: {{ if (include "kiali-server.identity.cert_file" .) }}"https"{{ else }}"http"{{ end }}
         {{- else }}
         prometheus.io/scrape: "false"
         prometheus.io/port: ""
+        prometheus.io/scheme: ""
         {{- end }}
         kiali.io/dashboards: go,kiali
         {{- if .Values.deployment.pod_annotations }}
@@ -48,7 +55,7 @@ spec:
       {{- if .Values.deployment.image_pull_secrets }}
       imagePullSecrets:
       {{- range .Values.deployment.image_pull_secrets }}
-      - name: {{ . }}
+      - name: {{ . | quote }}
       {{- end }}
       {{- end }}
       {{- if .Values.deployment.host_aliases }}
@@ -64,10 +71,17 @@ spec:
       {{- toYaml .Values.deployment.dns.config | nindent 8 }}
       {{- end }}
       {{- end }}
+      {{- if .Values.deployment.additional_pod_init_containers_yaml }}
+      initContainers:
+      {{- include "kiali-server.secureInitContainers" . | nindent 6 }}
+      {{- end }}
       containers:
+      {{- if .Values.deployment.additional_pod_containers_yaml }}
+      {{- include "kiali-server.secureContainers" . | nindent 6 }}
+      {{- end }}
       - image: "{{ .Values.deployment.image_name }}{{ if .Values.deployment.image_digest }}@{{ .Values.deployment.image_digest }}{{ end }}:{{ .Values.deployment.image_version }}"
-        imagePullPolicy: {{ .Values.deployment.image_pull_policy | default "Always" }}
-        name: {{ include "kiali-server.fullname" . }}
+        imagePullPolicy: {{ .Values.deployment.image_pull_policy | default "Always" | quote }}
+        name: kiali
         command:
         - "/opt/kiali/kiali"
         - "-config"
@@ -81,6 +95,8 @@ spec:
           privileged: false
           readOnlyRootFilesystem: true
           runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
           capabilities:
             drop:
             - ALL
@@ -153,8 +169,8 @@ spec:
         - name: {{ include "kiali-server.fullname" . }}-cabundle
           mountPath: "/kiali-cabundle"
         {{- range .Values.deployment.custom_secrets }}
-        - name: {{ .name }}
-          mountPath: "{{ .mount }}"
+        - name: {{ .name | quote }}
+          mountPath: {{ .mount | quote }}
         {{- end }}
         - name: "kiali-multi-cluster-secret"
           mountPath: "/kiali-remote-cluster-secrets/kiali-multi-cluster-secret"
@@ -170,6 +186,12 @@ spec:
           mountPath: "/kiali-remote-cluster-secrets/{{ .secret_name }}"
           readOnly: true
         {{- end }}
+        {{- end }}
+        {{- /* Auto-detected credential secret mounts */ -}}
+        {{- range $name, $config := (include "kiali-server.credential-secrets" .) | fromJson }}
+        - name: {{ $name }}
+          mountPath: "/kiali-override-secrets/{{ $name }}"
+          readOnly: true
         {{- end }}
         {{- if .Values.deployment.resources }}
         resources:
@@ -191,21 +213,32 @@ spec:
           {{- end }}
       - name: {{ include "kiali-server.fullname" . }}-secret
         secret:
-          secretName: {{ .Values.deployment.secret_name }}
+          secretName: {{ .Values.deployment.secret_name | quote }}
           optional: true
       - name: {{ include "kiali-server.fullname" . }}-cabundle
+      {{- if eq "true" (include "kiali-server.isOpenShift" .) }}
+        projected:
+          sources:
+          - configMap:
+              name: {{ include "kiali-server.fullname" . }}-cabundle-openshift
+          - configMap:
+              name: {{ include "kiali-server.fullname" . }}-cabundle
+              optional: true
+          - configMap:
+              name: {{ include "kiali-server.fullname" . }}-oauth-cabundle
+              optional: true
+      {{- else }}
         configMap:
           name: {{ include "kiali-server.fullname" . }}-cabundle
-      {{- if not (eq "true" (include "kiali-server.isOpenShift" .)) }}
           optional: true
       {{- end }}
       {{- range .Values.deployment.custom_secrets }}
-      - name: {{ .name }}
+      - name: {{ .name | quote }}
       {{- if .csi}}
         csi: {{ toYaml .csi | nindent 10 }}
       {{- else }}
         secret:
-          secretName: {{ .name }}
+          secretName: {{ .name | quote }}
           optional: {{ .optional | default false }}
       {{- end }}
       {{- end }}
@@ -224,6 +257,15 @@ spec:
         secret:
           secretName: {{ .secret_name }}
       {{- end }}
+      {{- end }}
+      {{- /* Auto-detected credential secret volumes */ -}}
+      {{- range $name, $config := (include "kiali-server.credential-secrets" .) | fromJson }}
+      - name: {{ $name }}
+        secret:
+          secretName: {{ $config.secret_name }}
+          items:
+          - key: {{ $config.secret_key }}
+            path: {{ $config.file_name }}
       {{- end }}
       {{- if or (.Values.deployment.affinity.node) (or (.Values.deployment.affinity.pod) (.Values.deployment.affinity.pod_anti)) }}
       affinity:

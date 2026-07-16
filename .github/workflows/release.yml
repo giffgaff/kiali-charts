@@ -2,8 +2,8 @@ name: Release
 
 on:
   schedule:
-  # Every Monday at 08:00 (UTC) - try to make sure it happens after all Kiali-related images are released
-  - cron: '00 8 * * MON'
+  # Every Monday at 09:14 (UTC) - intentionally tries to be after all Kiali-related images are released, and avoids potential peak time of 9:00
+  - cron: '14 9 * * MON'
   workflow_dispatch:
     inputs:
       release_type:
@@ -11,9 +11,9 @@ on:
         required: true
         type: choice
         options:
-        - major
-        - minor
         - patch
+        - minor
+        - major
       release_branch:
         description: Branch to release
         required: true
@@ -31,9 +31,10 @@ jobs:
       branch_version: ${{ steps.branch_version.outputs.branch_version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         ref: ${{ github.event.inputs.release_branch || github.ref_name }}
+        token: ${{ secrets.KIALI_BOT_TOKEN }}
         fetch-depth: 0
 
     - name: Prepare scripts
@@ -61,33 +62,37 @@ jobs:
         cat <<-EOF > minor.py
         import datetime
 
-        # The base date can be any end of sprint from the past
-        base = int(datetime.datetime.strptime("24/04/2022", "%d/%m/%Y").timestamp())
+        # The base date is set so that releases occur every 3 weeks starting from January 26, 2026
+        base = int(datetime.datetime.strptime("26/01/2026", "%d/%m/%Y").timestamp())
         now = int(datetime.datetime.now().timestamp())
 
         diff = now - base
 
-        days_elapsed = int(diff / (24*60*60))
-        weeks_elapsed = int(days_elapsed / 7)
-        weeks_mod3 = int(weeks_elapsed % 3)
+        # Use floor division (//) which correctly avoids rounding negative values to 0
+        days_elapsed = diff // (24*60*60)
+        weeks_elapsed = days_elapsed // 7
+        weeks_mod3 = weeks_elapsed % 3
 
-        print(weeks_mod3)
+        # Only release when weeks_elapsed >= 0 (past the base date) and weeks_mod3 == 0
+        print(weeks_elapsed >= 0 and weeks_mod3 == 0) # True in case of release
         EOF
 
     - name: Determine release type
       id: release_type
+      env:
+        INPUT_RELEASE_TYPE: ${{ github.event.inputs.release_type }}
       run: |
-        if [ -z ${{ github.event.inputs.release_type }} ];
+        if [ -z "$INPUT_RELEASE_TYPE" ];
         then
           DO_RELEASE=$(python minor.py)
-          if [[ $DO_RELEASE == "1" ]]
+          if [[ $DO_RELEASE == "True" ]]
           then
             echo "release_type=minor" >> $GITHUB_OUTPUT
           else
             echo "release_type=skip" >> $GITHUB_OUTPUT
           fi
         else
-          echo "release_type=${{ github.event.inputs.release_type }}" >> $GITHUB_OUTPUT
+          echo "release_type=$INPUT_RELEASE_TYPE" >> $GITHUB_OUTPUT
         fi
 
     - name: Determine release version
@@ -163,9 +168,10 @@ jobs:
       RELEASE_BRANCH: ${{ github.event.inputs.release_branch || github.ref_name }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         ref: ${{ github.event.inputs.release_branch || github.ref_name }}
+        token: ${{ secrets.KIALI_BOT_TOKEN }}
         fetch-depth: 0
 
     - name: Configure git
@@ -175,7 +181,18 @@ jobs:
         git config user.name 'kiali-bot'
 
     - name: Build Helm charts
-      run: make -e VERSION=$RELEASE_VERSION clean build-helm-charts
+      run: |
+        if [[ "$RELEASE_TYPE" == "patch" ]]; then
+          KIALI_OPERATOR_ORG_REPO_REF="kiali/kiali-operator/$BRANCH_VERSION"
+        else
+          KIALI_OPERATOR_ORG_REPO_REF="kiali/kiali-operator/master"
+        fi
+
+        echo "Validating CRDs against kiali-operator reference: $KIALI_OPERATOR_ORG_REPO_REF"
+
+        # The validate-crd-sync target will download golden CRDs from the operator repo and validate
+        # If this fails, it means the helm-charts CRDs are out of sync and the release cannot proceed
+        make -e VERSION=$RELEASE_VERSION KIALI_OPERATOR_ORG_REPO_REF=$KIALI_OPERATOR_ORG_REPO_REF clean validate-crd-sync build-helm-charts
 
     # Switch to `master` branch before updating docs/index.yaml
     - name: Checkout master
@@ -203,7 +220,7 @@ jobs:
 
         git commit -m "Release $RELEASE_VERSION"
 
-        git push origin $(git rev-parse HEAD):refs/tags/$RELEASE_VERSION-master
+        git push origin "$(git rev-parse HEAD):refs/tags/$RELEASE_VERSION-master"
 
     - name: Publish Helm charts
       env:
@@ -216,9 +233,9 @@ jobs:
         # Also, we create a vX.Y.Z tag.
         if [[ $RELEASE_TYPE == "minor" || $RELEASE_TYPE == "major" ]]
         then
-          git push origin $(git rev-parse HEAD):refs/heads/$BRANCH_VERSION
+          git push origin "$(git rev-parse HEAD):refs/heads/$BRANCH_VERSION"
 
-          git push origin $(git rev-parse HEAD):refs/tags/$RELEASE_VERSION
+          git push origin "$(git rev-parse HEAD):refs/tags/$RELEASE_VERSION"
 
           # Bump version stored in the Makefile
           sed -i -r "s/^VERSION \?= (.*)/VERSION \?= $NEXT_VERSION-SNAPSHOT/" Makefile
@@ -227,11 +244,11 @@ jobs:
 
           git commit -m "Prepare for next version"
 
-          git push origin $(git rev-parse HEAD):refs/heads/$BUILD_TAG
+          git push origin "$(git rev-parse HEAD):refs/heads/$BUILD_TAG"
 
           if [[ $GITHUB_REPOSITORY == 'kiali/helm-charts' ]]
           then
-            if hack/smoke-test-release-branch.sh --release-branch $BUILD_TAG; then
+            if hack/smoke-test-release-branch.sh --release-branch "$BUILD_TAG"; then
               prtitle="Prepare for next version (smoke test passed)"
               prmsg="The smoke test has passed. Please merge to update version numbers and prepare for release $NEXT_VERSION"
             else
@@ -243,17 +260,17 @@ jobs:
             prmsg="The smoke test does not run on this repository. Please merge to update version numbers and prepare for release $NEXT_VERSION"
           fi
 
-          gh pr create -t "$prtitle" -b "$prmsg" -H $BUILD_TAG -B $RELEASE_BRANCH
+          gh pr create -t "$prtitle" -b "$prmsg" -H "$BUILD_TAG" -B "$RELEASE_BRANCH"
 
         # For a patch release, everything is ready to publish the generated charts.
         # Let's push to master
         elif [[ $RELEASE_TYPE == "patch" ]]
         then
-          git push origin $(git rev-parse HEAD):refs/heads/$BUILD_TAG
+          git push origin "$(git rev-parse HEAD):refs/heads/$BUILD_TAG"
 
           if [[ $GITHUB_REPOSITORY == 'kiali/helm-charts' ]]
           then
-            if hack/smoke-test-release-branch.sh --release-branch $BUILD_TAG; then
+            if hack/smoke-test-release-branch.sh --release-branch "$BUILD_TAG"; then
               prtitle="Prepare for next version (smoke test passed)"
               prmsg="The smoke test has passed. Please merge to update version numbers and prepare for release $NEXT_VERSION"
             else
@@ -265,12 +282,12 @@ jobs:
             prmsg="The smoke test does not run on this repository. Please merge to update version numbers and prepare for release $NEXT_VERSION"
           fi
 
-          gh pr create -t "$prtitle" -b "$prmsg" -H $BUILD_TAG -B master
+          gh pr create -t "$prtitle" -b "$prmsg" -H "$BUILD_TAG" -B master
 
           # We did a patch release. In this case we need to go back to the version branch and do changes
           # to the Makefile in that branch to record what's the current path release. Then, commit and push.
           # Also, a vX.Y.Z branch is created
-          git checkout $RELEASE_BRANCH
+          git checkout "$RELEASE_BRANCH"
 
           sed -i -r "s/^VERSION \?= (.*)/VERSION \?= $RELEASE_VERSION/" Makefile
 
@@ -278,8 +295,8 @@ jobs:
 
           git commit -m "Record that $RELEASE_VERSION was released, in preparation for next patch version."
 
-          git push origin $(git rev-parse HEAD):$RELEASE_BRANCH
+          git push origin "$(git rev-parse HEAD):$RELEASE_BRANCH"
 
-          git push origin $(git rev-parse HEAD):refs/tags/$RELEASE_VERSION
+          git push origin "$(git rev-parse HEAD):refs/tags/$RELEASE_VERSION"
 
         fi
